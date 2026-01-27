@@ -10,7 +10,7 @@ Simple extension of v0.1 with configurable batch sizes.
 
 ## Installation
 
-1. Zip the `vod_strm_generator_v1.1` folder
+1. Zip the `plugin.py` file.
 2. In Dispatcharr → Plugins → Import
 3. Enable the plugin
 
@@ -120,3 +120,4 @@ Once this works perfectly:
 - Add more features
 
 But for now - keep it simple!
+
