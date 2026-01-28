@@ -1,6 +1,6 @@
 """
 VOD .strm Generator Plugin for Dispatcharr
-v1.3.0 - Real concurrent threading for series processing
+v1.1.0 - Optimized series processing with threading
 
 MIT License
 Copyright (c) 2025-2026 shedunraid
@@ -16,8 +16,8 @@ class Plugin:
     """Generate .strm files for VOD movies from Dispatcharr."""
     
     name = "VOD2MLIB"
-    version = "1.3.0"
-    description = """• Convert Dispatcharr VODs to media library format (.strm files).        • SETUP: Map a host folder to /VODS in your Dispatcharr container (e.g., /mnt/media:/VODS).        • Configure root folders in plugin settings (/VODS/Movies and /VODS/Series by default).        • USAGE: Click 'Scan for VODs' to see totals.        • Use 'Generate Movie/Series .strm Files' with batch sizes (start small like 10 to test).        • Episodes auto-fetch per series as needed.        • Repeat clicks until complete - smart skip logic prevents duplicates.        • TIMING: Movies are fast (~30 sec per 250).        • Series OPTIMIZED: REAL THREADING! 50-70% faster with 3 parallel workers (10 series: 120s → ~50s)!        • Use batch of 1 for testing.        • NOTE: If you get errors, do a full browser refresh (Ctrl+F5 / Cmd+Shift+R) and try again.        • If you like this plugin please donate: https://paypal.me/shedunraid"""
+    version = "1.2.0"
+    description = """• Convert Dispatcharr VODs to media library format (.strm files).        • SETUP: Map a host folder to /VODS in your Dispatcharr container (e.g., /mnt/media:/VODS).        • Configure root folders in plugin settings (/VODS/Movies and /VODS/Series by default).        • USAGE: Click 'Scan for VODs' to see totals.        • Use 'Generate Movie/Series .strm Files' with batch sizes (start small like 10 to test).        • Episodes auto-fetch per series as needed.        • Repeat clicks until complete - smart skip logic prevents duplicates.        • TIMING: Movies are fast (~30 sec per 250).        • Series OPTIMIZED: 50% faster with parallel processing (3 series at once)!        • Use batch of 1 for testing.        • NOTE: If you get errors, do a full browser refresh (Ctrl+F5 / Cmd+Shift+R) and try again.        • If you like this plugin please donate: https://paypal.me/shedunraid"""
     
     fields = [
         {
@@ -376,7 +376,7 @@ class Plugin:
         }
     
     def _generate_series(self, settings: Dict[str, Any], logger):
-        """Generate series .strm files with episodes using parallel processing."""
+        """Generate series .strm files with episodes."""
         series_root = settings.get("series_root_folder", "/VODS/Series")
         dispatcharr_url = settings.get("dispatcharr_url", "http://192.168.99.11:9191").rstrip("/")
         batch_size = settings.get("series_batch_size") or "10"
@@ -392,11 +392,11 @@ class Plugin:
         logger.info("  Dispatcharr URL: %s", dispatcharr_url)
         logger.info("  Batch Size: %s", batch_size)
         logger.info("  Generate NFO: %s", "Yes" if generate_nfo else "No")
-        logger.info("  Threading: ENABLED (3 workers)")
         logger.info("")
         
         try:
-            from apps.vod.models import M3USeriesRelation
+            from apps.vod.models import Series, M3USeriesRelation, M3UEpisodeRelation
+            from apps.vod.tasks import refresh_series_episodes
         except ImportError as e:
             logger.error("Failed to import models: %s", e)
             return {"status": "error", "message": f"Import error: {e}"}
@@ -412,7 +412,7 @@ class Plugin:
                 target_batch = total_count
             else:
                 target_batch = int(batch_size)
-                # Fetch enough to account for skips
+                # Fetch 3x batch size to account for skips
                 fetch_size = min(target_batch * 3, total_count)
                 series_relations = list(query[:fetch_size])
                 logger.info("Fetching %d series to process batch of %d", fetch_size, target_batch)
@@ -432,78 +432,146 @@ class Plugin:
         except Exception as e:
             return {"status": "error", "message": f"Folder creation error: {e}"}
         
-        # Process series with ThreadPoolExecutor (3 workers for safety)
+        # Process series until we've created the target batch
         created_strm = 0
         created_nfo = 0
         errors = 0
         series_created = 0
-        skipped = 0
         
-        logger.info("Processing series with 3 parallel workers:")
+        logger.info("Processing series:")
         logger.info("-" * 60)
         
-        max_workers = 3
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit tasks for series that need processing
-            futures = {}
-            submitted = 0
+        for idx, series_rel in enumerate(series_relations, 1):
+            series = series_rel.series
             
-            for series_rel in series_relations:
-                # Stop submitting if we already have enough created
-                if batch_size != "all" and series_created >= target_batch:
-                    break
-                
-                # Submit the processing task
-                future = executor.submit(
-                    self._process_single_series,
-                    series_rel,
-                    dispatcharr_url,
-                    generate_nfo,
-                    series_root,
-                    logger
-                )
-                futures[future] = series_rel
-                submitted += 1
+            # Clean series name
+            raw_name = series.name or f"Unknown Series {series.id}"
+            series_name = self._clean_title(raw_name)
+            year = series.year
             
-            logger.info("Submitted %d series for parallel processing...", submitted)
-            logger.info("")
+            if year:
+                series_folder_name = f"{self._sanitize_filename(series_name)} ({year})"
+            else:
+                series_folder_name = self._sanitize_filename(series_name)
             
-            # Process results as they complete
-            for idx, future in enumerate(as_completed(futures), 1):
-                series_rel = futures[future]
-                
+            series_folder = os.path.join(series_root, series_folder_name)
+            
+            # Stop if we've created enough series for this batch (unless processing all)
+            if batch_size != "all" and series_created >= target_batch:
+                logger.info("")
+                logger.info("Batch complete! Created %d series.", target_batch)
+                break
+            
+            # Check if already processed (has Season folders with content)
+            if os.path.exists(series_folder):
                 try:
-                    result = future.result()
-                    
-                    if result.get("skipped"):
-                        skipped += 1
-                        logger.info("[%d/%d] %s", idx, submitted, result["message"])
-                    elif result.get("created"):
-                        series_created += 1
-                        created_strm += result["episodes"]
-                        created_nfo += result["nfo_files"]
-                        logger.info("[%d/%d] %s", idx, submitted, result["message"])
-                    else:
-                        # No episodes or other issue
-                        logger.info("[%d/%d] %s", idx, submitted, result["message"])
-                    
-                    if "error" in result:
-                        errors += 1
-                    
-                    # Stop if we've created enough
-                    if batch_size != "all" and series_created >= target_batch:
+                    has_seasons = any(
+                        item.startswith("Season") and os.path.isdir(os.path.join(series_folder, item))
+                        for item in os.listdir(series_folder)
+                    )
+                    if has_seasons:
                         logger.info("")
-                        logger.info("Batch target reached! Waiting for in-progress tasks...")
-                        
-                except Exception as e:
-                    logger.error("[%d/%d] Error processing series: %s", idx, submitted, e)
-                    errors += 1
+                        logger.info("[%d/%d] %s - Already processed, skipping", idx, len(series_relations), series_name)
+                        continue
+                except:
+                    pass  # If error checking, process anyway
+            
+            logger.info("")
+            logger.info("[%d/%d] %s - Fetching episodes...", idx, len(series_relations), series_name)
+            
+            # Fetch episodes for this series (just-in-time)
+            try:
+                # Check if episodes already fetched
+                custom_props = series_rel.custom_properties or {}
+                if not custom_props.get('episodes_fetched', False):
+                    # Fetch episodes from provider
+                    refresh_series_episodes(
+                        account=series_rel.m3u_account,
+                        series=series_rel.series,
+                        external_series_id=series_rel.external_series_id
+                    )
+                
+                # Now get episodes for this series
+                # Get all episodes for this account, then filter by series ID
+                episodes = M3UEpisodeRelation.objects.filter(
+                    m3u_account=series_rel.m3u_account
+                ).select_related('episode')
+                
+                # Filter to only episodes belonging to this series
+                episodes = [ep for ep in episodes if ep.episode.series and ep.episode.series.id == series.id]
+                
+                # Sort by season and episode number
+                episodes = sorted(episodes, key=lambda ep: (ep.episode.season_number or 0, ep.episode.episode_number or 0))
+                
+                episode_count = len(episodes)
+                logger.info("  Episodes: %d", episode_count)
+                
+                if episode_count == 0:
+                    logger.info("  No episodes found, skipping")
+                    continue
+                
+                logger.info("  Creating %d episodes...", episode_count)
+                
+                # Create series folder
+                os.makedirs(series_folder, exist_ok=True)
+                
+                # Generate tvshow.nfo if enabled
+                if generate_nfo:
+                    tvshow_nfo_path = os.path.join(series_folder, "tvshow.nfo")
+                    category_name = series_rel.category.name if series_rel.category else ""
+                    tvshow_content = self._generate_tvshow_nfo(series, category_name)
+                    with open(tvshow_nfo_path, 'w', encoding='utf-8') as f:
+                        f.write(tvshow_content)
+                    created_nfo += 1
+                
+                # Process episodes by season
+                for episode_rel in episodes:
+                    episode = episode_rel.episode
+                    season_num = episode.season_number or 0
+                    episode_num = episode.episode_number or 0
+                    
+                    # Create season folder
+                    season_folder_name = f"Season {season_num:02d}"
+                    season_folder = os.path.join(series_folder, season_folder_name)
+                    os.makedirs(season_folder, exist_ok=True)
+                    
+                    # Build episode filename
+                    episode_title = episode.name or ""
+                    if episode_title:
+                        clean_title = self._clean_title(episode_title)
+                        filename = f"{series_name} - S{season_num:02d}E{episode_num:02d} - {clean_title}"
+                    else:
+                        filename = f"{series_name} - S{season_num:02d}E{episode_num:02d}"
+                    
+                    filename = self._sanitize_filename(filename)
+                    
+                    # Create .strm file
+                    strm_path = os.path.join(season_folder, f"{filename}.strm")
+                    proxy_url = f"{dispatcharr_url}/proxy/vod/episode/{episode.uuid}?stream_id={episode_rel.stream_id}"
+                    
+                    with open(strm_path, 'w', encoding='utf-8') as f:
+                        f.write(proxy_url)
+                    created_strm += 1
+                    
+                    # Create episode .nfo if enabled
+                    if generate_nfo:
+                        nfo_path = os.path.join(season_folder, f"{filename}.nfo")
+                        episode_nfo_content = self._generate_episode_nfo(episode)
+                        with open(nfo_path, 'w', encoding='utf-8') as f:
+                            f.write(episode_nfo_content)
+                        created_nfo += 1
+                
+                logger.info("  ✓ Done! Created %d episodes", episode_count)
+                series_created += 1
+                
+            except Exception as e:
+                logger.error("  ✗ Error fetching/creating episodes: %s", e)
+                errors += 1
         
         logger.info("")
         logger.info("=" * 60)
         logger.info("SUMMARY:")
         logger.info("  Series created: %d", series_created)
-        logger.info("  Series skipped: %d", skipped)
         logger.info("  Episodes created: %d", created_strm)
         if generate_nfo:
             logger.info("  NFO files created: %d", created_nfo)
@@ -522,147 +590,6 @@ class Plugin:
             "nfo_created": created_nfo if generate_nfo else 0,
             "errors": errors
         }
-    
-    def _process_single_series(self, series_rel, dispatcharr_url, generate_nfo, series_root, logger):
-        """Process a single series - fetches episodes and creates files (thread-safe)."""
-        from apps.vod.models import M3UEpisodeRelation
-        from apps.vod.tasks import refresh_series_episodes
-        
-        series = series_rel.series
-        
-        # Clean series name
-        raw_name = series.name or f"Unknown Series {series.id}"
-        series_name = self._clean_title(raw_name)
-        year = series.year
-        
-        if year:
-            series_folder_name = f"{self._sanitize_filename(series_name)} ({year})"
-        else:
-            series_folder_name = self._sanitize_filename(series_name)
-        
-        series_folder = os.path.join(series_root, series_folder_name)
-        
-        # Check if already processed (has Season folders with content)
-        if os.path.exists(series_folder):
-            try:
-                has_seasons = any(
-                    item.startswith("Season") and os.path.isdir(os.path.join(series_folder, item))
-                    for item in os.listdir(series_folder)
-                )
-                if has_seasons:
-                    return {
-                        "created": False,
-                        "skipped": True,
-                        "series_name": series_name,
-                        "episodes": 0,
-                        "nfo_files": 0,
-                        "message": f"{series_name} - Already processed"
-                    }
-            except:
-                pass  # If error checking, process anyway
-        
-        try:
-            # Fetch episodes for this series
-            custom_props = series_rel.custom_properties or {}
-            if not custom_props.get('episodes_fetched', False):
-                refresh_series_episodes(
-                    account=series_rel.m3u_account,
-                    series=series_rel.series,
-                    external_series_id=series_rel.external_series_id
-                )
-            
-            # Get episodes for this series
-            episodes = M3UEpisodeRelation.objects.filter(
-                m3u_account=series_rel.m3u_account
-            ).select_related('episode')
-            
-            # Filter to only episodes belonging to this series
-            episodes = [ep for ep in episodes if ep.episode.series and ep.episode.series.id == series.id]
-            
-            # Sort by season and episode number
-            episodes = sorted(episodes, key=lambda ep: (ep.episode.season_number or 0, ep.episode.episode_number or 0))
-            
-            episode_count = len(episodes)
-            
-            if episode_count == 0:
-                return {
-                    "created": False,
-                    "skipped": False,
-                    "series_name": series_name,
-                    "episodes": 0,
-                    "nfo_files": 0,
-                    "message": f"{series_name} - No episodes found"
-                }
-            
-            # Create series folder
-            os.makedirs(series_folder, exist_ok=True)
-            
-            nfo_count = 0
-            
-            # Generate tvshow.nfo if enabled
-            if generate_nfo:
-                tvshow_nfo_path = os.path.join(series_folder, "tvshow.nfo")
-                category_name = series_rel.category.name if series_rel.category else ""
-                tvshow_content = self._generate_tvshow_nfo(series, category_name)
-                with open(tvshow_nfo_path, 'w', encoding='utf-8') as f:
-                    f.write(tvshow_content)
-                nfo_count += 1
-            
-            # Process episodes by season
-            for episode_rel in episodes:
-                episode = episode_rel.episode
-                season_num = episode.season_number or 0
-                episode_num = episode.episode_number or 0
-                
-                # Create season folder
-                season_folder_name = f"Season {season_num:02d}"
-                season_folder = os.path.join(series_folder, season_folder_name)
-                os.makedirs(season_folder, exist_ok=True)
-                
-                # Build episode filename
-                episode_title = episode.name or ""
-                if episode_title:
-                    clean_title = self._clean_title(episode_title)
-                    filename = f"{series_name} - S{season_num:02d}E{episode_num:02d} - {clean_title}"
-                else:
-                    filename = f"{series_name} - S{season_num:02d}E{episode_num:02d}"
-                
-                filename = self._sanitize_filename(filename)
-                
-                # Create .strm file
-                strm_path = os.path.join(season_folder, f"{filename}.strm")
-                proxy_url = f"{dispatcharr_url}/proxy/vod/episode/{episode.uuid}?stream_id={episode_rel.stream_id}"
-                
-                with open(strm_path, 'w', encoding='utf-8') as f:
-                    f.write(proxy_url)
-                
-                # Create episode .nfo if enabled
-                if generate_nfo:
-                    nfo_path = os.path.join(season_folder, f"{filename}.nfo")
-                    episode_nfo_content = self._generate_episode_nfo(episode)
-                    with open(nfo_path, 'w', encoding='utf-8') as f:
-                        f.write(episode_nfo_content)
-                    nfo_count += 1
-            
-            return {
-                "created": True,
-                "skipped": False,
-                "series_name": series_name,
-                "episodes": episode_count,
-                "nfo_files": nfo_count,
-                "message": f"{series_name} - ✓ Created {episode_count} episodes"
-            }
-            
-        except Exception as e:
-            return {
-                "created": False,
-                "skipped": False,
-                "series_name": series_name,
-                "episodes": 0,
-                "nfo_files": 0,
-                "error": str(e),
-                "message": f"{series_name} - ✗ Error: {e}"
-            }
     
     def _cleanup_movies(self, settings: Dict[str, Any], logger):
         """Clean up all generated movie .strm files and folders."""
