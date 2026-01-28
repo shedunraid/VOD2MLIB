@@ -1,4 +1,4 @@
-# VOD .strm Generator v1.1
+# VOD .strm Generator v1.3
 
 Simple extension of v0.1 with configurable batch sizes.
 
@@ -120,4 +120,5 @@ Once this works perfectly:
 - Add more features
 
 But for now - keep it simple!
+
 
