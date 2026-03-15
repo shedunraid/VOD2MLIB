@@ -1,0 +1,85 @@
+{
+  "name": "VOD2MLIB",
+  "version": "1.4.0",
+  "description": "Convert Dispatcharr VODs to media library format (.strm files) for movies and series. Set root folders to enable each content type — leave blank to disable. Cleanup removes only orphaned folders not present in Dispatcharr. Cron schedules auto-apply whenever settings are saved; leave blank to disable.",
+  "author": "shedunraid",
+  "help_url": "https://github.com/shedunraid/VODVSCODE",
+  "fields": [
+    {
+      "id": "root_folder",
+      "label": "Root Folder for Movies",
+      "type": "string",
+      "default": "/vod/movies",
+      "help_text": "Path where movie folders will be created. Leave blank to disable movie processing."
+    },
+    {
+      "id": "series_root_folder",
+      "label": "Root Folder for Series",
+      "type": "string",
+      "default": "/vod/series",
+      "help_text": "Path where series folders will be created. Leave blank to disable series processing."
+    },
+    {
+      "id": "dispatcharr_url",
+      "label": "Dispatcharr URL (IMPORTANT!)",
+      "type": "string",
+      "default": "http://{ipaddress}:9191",
+      "help_text": "Must be your actual IP address or reachable hostname, not localhost. This URL is written into .strm files and must be accessible from your media server."
+    },
+    {
+      "id": "batch_size",
+      "label": "Batch Size",
+      "type": "select",
+      "default": "100",
+      "options": [
+        {"value": "1", "label": "1 (testing)"},
+        {"value": "5", "label": "5"},
+        {"value": "10", "label": "10"},
+        {"value": "25", "label": "25"},
+        {"value": "100", "label": "100"},
+        {"value": "250", "label": "250"},
+        {"value": "1000", "label": "1000"},
+        {"value": "all", "label": "All (slow!)"}
+      ],
+      "help_text": "Number of movies or series to process per run"
+    },
+    {
+      "id": "generate_nfo",
+      "label": "Generate NFO Files",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Create .nfo metadata files for movies, series, and episodes"
+    },
+    {
+      "id": "generate_schedule_cron",
+      "label": "Generate Schedule (Cron)",
+      "type": "string",
+      "default": "0 2 * * *",
+      "help_text": "Cron format: minute hour day month weekday. E.g. '0 2 * * *' = 2 AM daily, '0 2 * * 1-5' = 2 AM weekdays. Leave blank to disable. Schedules auto-apply when saved."
+    },
+    {
+      "id": "cleanup_schedule_cron",
+      "label": "Cleanup Schedule (Cron)",
+      "type": "string",
+      "default": "0 3 * * 0",
+      "help_text": "Cron format: minute hour day month weekday. E.g. '0 3 * * 0' = 3 AM every Sunday, '0 3 1 * *' = 3 AM on the 1st of each month. Leave blank to disable. Schedules auto-apply when saved."
+    }
+  ],
+  "actions": [
+    {
+      "id": "generate_all",
+      "label": "Generate All",
+      "description": "Scan VODs then generate .strm files. Movies processed if Root Folder for Movies is set; series if Root Folder for Series is set."
+    },
+    {
+      "id": "cleanup_all",
+      "label": "Clean Up All",
+      "description": "Remove orphaned .strm folders not present in Dispatcharr. Movies processed if Root Folder for Movies is set; series if Root Folder for Series is set."
+    },
+    {
+      "id": "manage_schedules",
+      "label": "Apply & Check Schedules",
+      "description": "Apply current cron settings (non-blank enables, blank disables) then report scheduler status"
+    }
+  ]
+}
