@@ -25,6 +25,7 @@ class Plugin:
     _generate_scheduler_cron = None   # cron the running generate scheduler was started with
     _cleanup_scheduler_cron = None    # cron the running cleanup scheduler was started with
     _last_root_folder = None          # tracks root folder at last scheduler start
+    _action_running = False           # prevents concurrent generate/cleanup runs
     _last_series_root_folder = None   # tracks series root folder at last scheduler start
 
     description = (
@@ -140,15 +141,35 @@ class Plugin:
         logger.info("Action: %s", action)
         logger.info("=" * 60)
 
-        if action == "generate_all":
-            return self._generate_all(settings, logger)
-        elif action == "cleanup_all":
-            return self._cleanup_all(settings, logger)
+        if action in ("generate_all", "cleanup_all"):
+            return self._dispatch_background(action, settings, logger)
         elif action == "manage_schedules":
             return self._manage_schedules(settings, logger)
 
         return {"status": "error", "message": f"Unknown action: {action}"}
     
+    def _dispatch_background(self, action: str, settings: Dict[str, Any], logger):
+        """Run a heavy action in a background thread and return immediately to avoid HTTP timeouts."""
+        import threading
+
+        if Plugin._action_running:
+            logger.warning("A task is already running. Please wait for it to complete.")
+            return {"status": "error", "message": "A task is already running — check the log panel for progress"}
+
+        target = self._generate_all if action == "generate_all" else self._cleanup_all
+
+        def worker():
+            Plugin._action_running = True
+            try:
+                target(settings, logger)
+            except Exception as e:
+                logger.error("Unhandled error in %s: %s", action, e)
+            finally:
+                Plugin._action_running = False
+
+        threading.Thread(target=worker, daemon=True, name=f"VOD2MLIB-{action}").start()
+        return {"status": "ok", "message": "Started — check the log panel for progress"}
+
     def _generate_all(self, settings: Dict[str, Any], logger):
         """Scan VODs then generate .strm files for all configured content types."""
         movies_enabled = bool(settings.get("root_folder", "").strip())
