@@ -343,17 +343,10 @@ class Plugin:
             # Create movie folder and paths
             movie_folder = os.path.join(root_folder, folder_name)
             strm_path = os.path.join(movie_folder, strm_filename)
-            
-            # Check if already processed
-            if os.path.exists(strm_path):
-                skipped += 1
-                if idx % 50 == 1 or idx <= 10:
-                    logger.info("")
-                    logger.info("[%d/%d] %s - Already exists, skipping", idx, len(movie_relations), movie_name)
-                continue
-            
-            # Stop if we've created enough for this batch (unless processing all)
-            if batch_size != "all" and created_strm >= target_batch:
+            is_update = os.path.exists(strm_path)
+
+            # Stop if we've created enough new files for this batch (unless processing all)
+            if batch_size != "all" and not is_update and created_strm >= target_batch:
                 logger.info("")
                 logger.info("Batch complete! Created %d movies.", target_batch)
                 break
@@ -373,26 +366,26 @@ class Plugin:
             try:
                 # Create folder
                 os.makedirs(movie_folder, exist_ok=True)
-                
-                # Write .strm file
+
+                # Always write .strm so URL changes are picked up
                 with open(strm_path, 'w', encoding='utf-8') as f:
                     f.write(proxy_url)
                 created_strm += 1
-                
-                # Write .nfo file if enabled
+
+                # Only write .nfo if it doesn't already exist
                 if generate_nfo:
                     nfo_filename = strm_filename.replace('.strm', '.nfo')
                     nfo_path = os.path.join(movie_folder, nfo_filename)
-                    
-                    category_name = relation.category.name if relation.category else ""
-                    nfo_content = self._generate_nfo(movie, category_name)
-                    
-                    with open(nfo_path, 'w', encoding='utf-8') as f:
-                        f.write(nfo_content)
-                    created_nfo += 1
-                
+                    if not os.path.exists(nfo_path):
+                        category_name = relation.category.name if relation.category else ""
+                        nfo_content = self._generate_nfo(movie, category_name)
+                        with open(nfo_path, 'w', encoding='utf-8') as f:
+                            f.write(nfo_content)
+                        created_nfo += 1
+
                 if idx % 50 == 1 or idx <= 10:
-                    logger.info("  ✓ Created: .strm%s", " + .nfo" if generate_nfo else "")
+                    verb = "Updated" if is_update else "Created"
+                    logger.info("  ✓ %s: .strm%s", verb, " + .nfo" if generate_nfo else "")
                 
             except Exception as e:
                 logger.error("  ✗ Error: %s", e)
@@ -594,24 +587,9 @@ class Plugin:
         
         series_folder = os.path.join(series_root, series_folder_name)
         
-        # Check if already processed (has Season folders with content)
-        if os.path.exists(series_folder):
-            try:
-                has_seasons = any(
-                    item.startswith("Season") and os.path.isdir(os.path.join(series_folder, item))
-                    for item in os.listdir(series_folder)
-                )
-                if has_seasons:
-                    return {
-                        "created": False,
-                        "skipped": True,
-                        "series_name": series_name,
-                        "episodes": 0,
-                        "nfo_files": 0,
-                        "message": f"{series_name} - Already processed"
-                    }
-            except:
-                pass  # If error checking, process anyway
+        # Note: we do not skip existing series — .strm files are always rewritten
+        # so that URL changes are picked up. .nfo files are only written if missing.
+        is_update = os.path.exists(series_folder)
         
         try:
             # Fetch episodes for this series
@@ -651,14 +629,15 @@ class Plugin:
             
             nfo_count = 0
             
-            # Generate tvshow.nfo if enabled
+            # Generate tvshow.nfo only if it doesn't already exist
             if generate_nfo:
                 tvshow_nfo_path = os.path.join(series_folder, "tvshow.nfo")
-                category_name = series_rel.category.name if series_rel.category else ""
-                tvshow_content = self._generate_tvshow_nfo(series, category_name)
-                with open(tvshow_nfo_path, 'w', encoding='utf-8') as f:
-                    f.write(tvshow_content)
-                nfo_count += 1
+                if not os.path.exists(tvshow_nfo_path):
+                    category_name = series_rel.category.name if series_rel.category else ""
+                    tvshow_content = self._generate_tvshow_nfo(series, category_name)
+                    with open(tvshow_nfo_path, 'w', encoding='utf-8') as f:
+                        f.write(tvshow_content)
+                    nfo_count += 1
             
             # Process episodes by season
             for episode_rel in episodes:
@@ -688,13 +667,14 @@ class Plugin:
                 with open(strm_path, 'w', encoding='utf-8') as f:
                     f.write(proxy_url)
                 
-                # Create episode .nfo if enabled
+                # Create episode .nfo only if it doesn't already exist
                 if generate_nfo:
                     nfo_path = os.path.join(season_folder, f"{filename}.nfo")
-                    episode_nfo_content = self._generate_episode_nfo(episode)
-                    with open(nfo_path, 'w', encoding='utf-8') as f:
-                        f.write(episode_nfo_content)
-                    nfo_count += 1
+                    if not os.path.exists(nfo_path):
+                        episode_nfo_content = self._generate_episode_nfo(episode)
+                        with open(nfo_path, 'w', encoding='utf-8') as f:
+                            f.write(episode_nfo_content)
+                        nfo_count += 1
             
             return {
                 "created": True,
@@ -702,7 +682,7 @@ class Plugin:
                 "series_name": series_name,
                 "episodes": episode_count,
                 "nfo_files": nfo_count,
-                "message": f"{series_name} - ✓ Created {episode_count} episodes"
+                "message": f"{series_name} - ✓ {'Updated' if is_update else 'Created'} {episode_count} episodes"
             }
             
         except Exception as e:
