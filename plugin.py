@@ -148,27 +148,43 @@ class Plugin:
 
         return {"status": "error", "message": f"Unknown action: {action}"}
     
+    def _notify(self, message: str, level: str = "info"):
+        """Push a notification to the Dispatcharr notification panel via WebSocket."""
+        try:
+            from core.utils import send_websocket_update
+            send_websocket_update("updates", "update", {
+                "type": "plugin",
+                "plugin": self.name,
+                "level": level,
+                "message": message,
+            })
+        except Exception:
+            pass  # Fail silently if websocket is unavailable
+
     def _dispatch_background(self, action: str, settings: Dict[str, Any], logger):
         """Run a heavy action in a background thread and return immediately to avoid HTTP timeouts."""
         import threading
 
         if Plugin._action_running:
-            logger.warning("A task is already running. Please wait for it to complete.")
-            return {"status": "error", "message": "A task is already running — check the log panel for progress"}
+            self._notify("VOD2MLIB: A task is already running — please wait for it to complete.", "warning")
+            return {"status": "error", "message": "A task is already running — please wait for it to complete"}
 
         target = self._generate_all if action == "generate_all" else self._cleanup_all
+        label = "Generate All" if action == "generate_all" else "Cleanup All"
 
         def worker():
             Plugin._action_running = True
+            self._notify(f"VOD2MLIB: {label} started...")
             try:
                 target(settings, logger)
             except Exception as e:
                 logger.error("Unhandled error in %s: %s", action, e)
+                self._notify(f"VOD2MLIB: {label} failed — {e}", "error")
             finally:
                 Plugin._action_running = False
 
         threading.Thread(target=worker, daemon=True, name=f"VOD2MLIB-{action}").start()
-        return {"status": "ok", "message": "Started — check the log panel for progress"}
+        return {"status": "ok", "message": f"{label} started — notifications will appear as sections complete"}
 
     def _generate_all(self, settings: Dict[str, Any], logger):
         """Scan VODs then generate .strm files for all configured content types."""
@@ -195,12 +211,17 @@ class Plugin:
 
         if movies_enabled:
             logger.info("--- Generating movies ---")
-            self._generate_movies(settings, logger)
+            result = self._generate_movies(settings, logger)
+            if result:
+                self._notify(f"VOD2MLIB Movies: {result.get('message', 'done')}", "error" if result.get("status") == "error" else "info")
 
         if series_enabled:
             logger.info("--- Generating series ---")
-            self._generate_series(settings, logger)
+            result = self._generate_series(settings, logger)
+            if result:
+                self._notify(f"VOD2MLIB Series: {result.get('message', 'done')}", "error" if result.get("status") == "error" else "info")
 
+        self._notify("VOD2MLIB: Generate All complete")
         return {"status": "ok", "message": "Generate All complete"}
 
     def _cleanup_all(self, settings: Dict[str, Any], logger):
@@ -215,12 +236,17 @@ class Plugin:
 
         if movies_enabled:
             logger.info("--- Cleaning up orphaned movies ---")
-            self._cleanup_movies(settings, logger)
+            result = self._cleanup_movies(settings, logger)
+            if result:
+                self._notify(f"VOD2MLIB Movies Cleanup: {result.get('message', 'done')}", "error" if result.get("status") == "error" else "info")
 
         if series_enabled:
             logger.info("--- Cleaning up orphaned series ---")
-            self._cleanup_series(settings, logger)
+            result = self._cleanup_series(settings, logger)
+            if result:
+                self._notify(f"VOD2MLIB Series Cleanup: {result.get('message', 'done')}", "error" if result.get("status") == "error" else "info")
 
+        self._notify("VOD2MLIB: Cleanup All complete")
         return {"status": "ok", "message": "Cleanup All complete"}
     
     def _generate_movies(self, settings: Dict[str, Any], logger):
@@ -232,18 +258,10 @@ class Plugin:
         
         # Validate URL is not localhost
         if "localhost" in dispatcharr_url.lower() or "127.0.0.1" in dispatcharr_url:
-            logger.error("=" * 60)
-            logger.error("CONFIGURATION ERROR!")
-            logger.error("Dispatcharr URL is set to localhost/127.0.0.1")
-            logger.error("This will NOT work in media servers!")
-            logger.error("")
-            logger.error("Current setting: %s", dispatcharr_url)
-            logger.error("Change to: http://192.168.99.11:9191 (or your actual IP)")
-            logger.error("=" * 60)
-            return {
-                "status": "error",
-                "message": "Dispatcharr URL must be an actual IP address, not localhost! Update settings and try again."
-            }
+            msg = "VOD2MLIB: Dispatcharr URL is set to localhost — this will not work. Set it to your actual LAN IP in plugin settings."
+            logger.error(msg)
+            self._notify(msg, "error")
+            return {"status": "error", "message": msg}
         
         logger.info("")
         logger.info("Configuration:")
